@@ -295,4 +295,37 @@ window.CLEARSKY_CONFIG = {
 })(window.CLEARSKY_CONFIG);
 
 
+/* ═══════════════════════════════════════════════════════════════════════════════
+   TENANT MODULE LOADER
+   Pulls in /tremco-netzero.js, which appends the Client & Asset Analysis panel
+   to the dashboard.
+
+   WHY IT LOADS FROM HERE. index.html is shared byte-identical across tenants,
+   so it cannot carry a Tremco-only <script> tag. config.js is the tenant file
+   and is already loaded by index.html, projects.html and marketplace.html — so
+   injecting from here gets the module onto every page that needs it without
+   forking anything shared.
+
+   editor.html is the exception: it does NOT load config.js (it carries its own
+   inline _CFG), so it cannot be reached this way. That is why persisting the
+   editor's net-zero results needs a real upstream change rather than another
+   injection. See README → "Wiring the editor's net-zero results".
+   ═══════════════════════════════════════════════════════════════════════════════ */
+(function () {
+  /* Only the dashboard has the #kpi-grid anchor today, but loading it on the
+     other tenant pages is harmless — the module mounts only where it finds one
+     and gives up quietly otherwise. */
+  var s = document.createElement('script');
+  s.src = '/tremco-netzero.js';
+  s.async = false;                 // preserve order relative to omega-brand.js
+  s.onerror = function () {
+    if (window.console && console.warn) {
+      console.warn('[ClearSky-OMEGA] /tremco-netzero.js failed to load. The '
+        + 'dashboard still works; the Client & Asset Analysis panel will be absent.');
+    }
+  };
+  document.head.appendChild(s);
+})();
+
+
 })();

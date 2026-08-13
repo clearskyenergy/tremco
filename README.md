@@ -74,6 +74,143 @@ To harden expiry into an actual lockout, set `lockOnExpiry: true` inside the
 
 ---
 
+## Client & Asset Analysis (net-zero KPIs)
+
+`tremco-netzero.js` adds a **Client & Asset Analysis** panel to the dashboard,
+rolling up every zone that has been through the editor's **Building / Net-Zero**
+panel into client- and asset-level KPIs.
+
+The KPI set is deliberately Tremco's, not the platform's. The shared dashboard
+above it counts sites under control, MWh quoted and interconnection stage —
+those are a storage developer's numbers. Tremco's question is *whose buildings
+have we analysed, how much roof is that, and how many of them clear a
+threshold that pays.*
+
+| Tier | KPIs | Live today? |
+|---|---|---|
+| Coverage | Clients analysed · Buildings analysed · **Roof area analysed** · Gross floor area · Retrofit vs new build | **Yes** |
+| Net-zero performance | Energy modelled · Net Zero Energy · High Performance · Below benchmark · Above benchmark | Needs the editor change below |
+| LL97 compliance | LL97-applicable · Assessed vs cap · Over cap · Annual penalty exposure · Alt-pathway filed | Applicability yes; cap test needs the change below |
+
+Plus a per-client table sorted by roof area, since that is the number that sizes
+the work.
+
+The performance bands are lifted from the NBI / NYSERDA *Getting to Zero* list
+definitions rather than invented, so a figure here means the same thing it means
+in the report a client is holding: **Net Zero Energy** is net EUI at or below
+zero, **High Performance** is 30% or more below the code in effect. "Certified"
+and "Verified" are third-party states (ILFI, NBI) and are deliberately *not*
+inferred — a modelled result must never be counted as a verified one.
+
+### How it loads without forking anything
+
+`index.html` is shared, so it cannot carry a Tremco-only `<script>` tag.
+Instead `config.js` — which is the tenant file — injects the module at the
+bottom. That reaches `index.html`, `projects.html` and `marketplace.html`,
+all three of which load `config.js`.
+
+**`editor.html` does not load `config.js`.** It carries its own inline `_CFG`
+block. That is why the editor side below needs a real upstream change rather
+than another injection.
+
+To preview the panel without deploying, open `tremco-netzero-preview.html` in a
+browser. It renders both states against sample data, no Firebase needed.
+
+### ⚠ Wiring the editor's net-zero results
+
+**The numbers for the energy and carbon tiers are not in Firestore yet.**
+
+The editor stores each zone's Building/Net-Zero **inputs** on `shapes[].bnz`
+(assemblies, stories, property type, occupancy group, BPS jurisdiction), and
+those do get saved. But geometry and energy **results** are derived on read and
+deliberately never stored — the comment in `bnzGeometry()` is explicit that
+this is to stop undo aliasing a stale copy.
+
+So this module recomputes geometry itself (shoelace on `shapes[].pts` with
+`pxPerFt`, mirroring the editor's own math — verified to the square foot against
+it). It does **not** recompute EUI or tCO₂e. That needs climate station HDD/CDD,
+assembly R-values and the ROM benchmarks, all of which live inside
+`editor.html`. Duplicating that engine here would guarantee the dashboard and
+the drawing eventually disagree about the same building, which is worse than an
+empty tile.
+
+The fix is one block in `editor.html`, in the save payload builder around
+line 22491, right before `_stripUndefinedInPlace(payload)`:
+
+```js
+/* Persist a compact result summary so portal dashboards can roll up
+   net-zero performance without duplicating the energy engine.
+   Inputs live on shapes[].bnz; this is the ANSWER, keyed by shape id. */
+netZero: (function () {
+  var out = { computedAt: new Date().toISOString(), zones: {} };
+  (S.shapes || []).forEach(function (sh) {
+    if (!sh || !sh.bnz) return;
+    try {
+      var E = bnzEnergy(sh);            // existing engine, already on this page
+      if (!E || !E.ok) return;
+      var g = bnzGeometry(sh);
+      out.zones[sh.id] = {
+        proposedEui:  E.proposed.eui,
+        baselineEui:  E.baseline.eui,
+        benchmarkEui: E.benchmarkEui,
+        netEui:       (E.proposed.netEui != null ? E.proposed.netEui : null),
+        tco2ePerYr:   (E.carbon && E.carbon[0]) ? E.carbon[0].tco2e : null,
+        gfaSf:        g.gfaSf,
+        roofSf:       g.roofSf,
+        sanity:       E.sanity
+      };
+    } catch (e) { /* one bad zone must not block the save */ }
+  });
+  return out;
+})(),
+```
+
+Confirm the accessor names against the engine before shipping — `bnzEnergy`
+is the entry point the export path uses, but the `carbon` array shape is worth
+checking. This is tenant-neutral and belongs upstream: every tenant gets
+dashboard rollups out of it, and the module already reads `netZero.zones[shapeId]`
+and lights up the moment it appears. Nothing here needs changing.
+
+Until then the energy tiles render **"—" and a reason, never "0"**. A zero and a
+missing measurement are not the same claim, and a dashboard that conflates them
+will eventually get someone to quote a roof off a number nobody computed.
+
+### ⚠ Editor projects are invisible on the dashboard until claimed
+
+Separate from the above, and it will look like this feature is broken:
+
+The shared dashboard's rollup is locked to `DASH_SCOPE = 'mine'` and filters on
+`ownerEmail === signed-in user`. **The editor never writes `ownerEmail`** — it
+writes `uid`. So a project created in the editor matches nobody and appears on
+no one's personal dashboard.
+
+`index.html` handles this with an "N projects have no owner yet → Assign
+ownership" prompt, so it is recoverable, but it is a manual step per project and
+nothing tells the user it is required.
+
+The Client & Asset Analysis panel **scopes to `orgId`, not to the user**, and so
+is unaffected — it shows the whole company's assets by design, which is the
+point of a client-and-asset rollup. Expect the two to disagree until projects
+are claimed. That is not a bug in either one, but it will get reported as one.
+
+### Known limits
+
+- **NYC LL97 is the only jurisdiction the engine carries.** Tremco is national —
+  Beachwood HQ, work across schools, healthcare and federal — so most of their
+  portfolio has no BPS target modelled at all. Those buildings still count under
+  Coverage; they simply never appear in the compliance tier. If Tremco's pilot is
+  a national portfolio rather than a NY one, adding jurisdictions upstream is the
+  higher-value change, not anything in this file.
+- **The LL97 caps table is now in two places** — `BPS_TARGETS` in `editor.html`
+  and `LL97` in `tremco-netzero.js` — because the editor's copy isn't reachable
+  from the dashboard. Both carry an `asOf` stamp. If NYC revises the caps, change
+  both.
+- **Zones drawn before a scale was set have no real-world area.** They are
+  counted as buildings and reported separately as "without a drawing scale"
+  rather than folded in as zero square feet.
+
+---
+
 ## Converting to Tier 1
 
 One line, at the top of `config.js`:
@@ -137,6 +274,8 @@ preset here — add one to the `PLANS` map in `config.js` if you need it.
 | `firestore-terms.rules` | **shared** | Rule backing the ToS gate |
 | `sales-proposal.html` | **not actually shared — see below** | Proposal builder |
 | `config.js` | **tenant-specific** | The main file to edit |
+| `tremco-netzero.js` | **tenant-specific** | Client & Asset Analysis KPI panel |
+| `tremco-netzero-preview.html` | dev only | Offline preview of the panel; inert, safe to delete |
 | `tremco-logo.png` | tenant asset | Tremco wordmark |
 | `tremco-logo-white.png` | tenant asset | Reversed, for dark backgrounds |
 | `omega-logo.png` | platform asset | ClearSky-OMEGA mark |
