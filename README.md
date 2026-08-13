@@ -74,6 +74,104 @@ To harden expiry into an actual lockout, set `lockOnExpiry: true` inside the
 
 ---
 
+## ⚠ The Upgrade badge flicker (platform bug, patched locally)
+
+**Symptom.** The "Upgrade" badge on a locked Quick Access tile jumps in and out
+of position as the pointer moves across the row.
+
+**This is not a Tremco problem.** It is in the shared `index.html` and hits
+every tenant below Enterprise. `applyToolLocks()` early-returns at
+`tierLevel >= 3`, so Enterprise never locks anything and never sees it. Every
+trial and Tier 1 deployment on this build does.
+
+### Cause
+
+`applyToolLocks()` locks any `[data-tool]` element the plan doesn't cover, and
+two different kinds of element carry that attribute:
+
+| Element | Used for | `position` |
+|---|---|---|
+| `.pm-tile` | marketplace / My Applications cards | `relative` |
+| `.quick-link` | the four Quick Access tiles | **none — static** |
+
+`lockTile()` appends `.pm-lock-badge` (`position:absolute; top:8px; right:8px`)
+and `.pm-lock` (`position:absolute; inset:0`) to whichever it locked. An
+absolutely positioned element resolves against its nearest *positioned*
+ancestor — so on a `.quick-link` both children escape the tile and anchor to
+`.dash-block[data-block="command"]`, the panel that wraps Quick Access **and**
+the Portfolio Command Center.
+
+What turns a misplacement into a flicker is one line:
+
+```css
+.quick-link:hover{ ... transform:translateY(-1px) }
+```
+
+A non-`none` transform makes an element a containing block for absolutely
+positioned descendants. So while the tile is hovered the badge snaps correctly
+into its corner, and the instant the pointer leaves it jumps back out to the
+corner of the whole block. Crossing the row toggles it repeatedly.
+
+It reads as a flicker rather than as an obviously misplaced label only because
+the command block's right edge nearly coincides with the last tile's, so the
+escaped badge lands close to where it belongs.
+
+### Two more symptoms, same root cause
+
+Both are worth checking on the live site, since they were probably being read
+as separate problems:
+
+1. **Locked Quick Access tiles don't look locked.** The grey-out and the
+   "Upgrade to unlock" hover overlay are scoped to `.pm-tile.locked`, which a
+   `.quick-link` never matches. The tile looks fully enabled until clicking it
+   opens the upgrade modal.
+2. **An invisible layer over the whole panel.** `.pm-lock` is `inset:0` against
+   that same block, so one locked Quick Access tile stretches an
+   `opacity:0; z-index:3` div across all of Quick Access and the Command
+   Center. Zero opacity does not stop hit-testing. If anything in that panel is
+   intermittently unclickable, this is the first thing to suspect.
+
+### The fix — upstream, in `index.html`
+
+Replace the three locked-tile rules (around line 484) so they cover both kinds
+of tile:
+
+```css
+.pm-tile.locked,
+.quick-link.locked{ position:relative; cursor:pointer; }
+
+.pm-tile.locked > *:not(.pm-lock),
+.quick-link.locked > *:not(.pm-lock):not(.pm-lock-badge){
+  filter:grayscale(.85) opacity(.45); pointer-events:none;
+}
+
+.pm-tile.locked:hover .pm-lock,
+.quick-link.locked:hover .pm-lock{ opacity:1; }
+```
+
+And add `position:relative` to the base `.quick-link` rule (line 404) so
+nothing absolutely positioned inside a Quick Access tile can escape again,
+locked or not.
+
+Do **not** collapse these to a bare `.locked` selector. `.pin-btn.locked`
+already exists for a different purpose and would inherit the grey-out.
+
+### The local stopgap
+
+`tremco-patches.js` injects exactly that CSS, loaded from `config.js`. It uses
+no `!important`, so if the upstream fix ships while this file is still present
+the two agree rather than fight.
+
+**Delete `tremco-patches.js` and its loader block in `config.js` once the
+upstream fix lands.** A tenant-local patch for a platform bug means Tremco
+quietly diverges on something that should be fixed for FENECON and iQGen too.
+
+One thing to know before anyone draws the wrong conclusion: converting this
+tenant to `tier1` unlocks the `investment` tile, so the symptom vanishes on its
+own. That is the bug going out of scope, not the bug being fixed.
+
+---
+
 ## Client & Asset Analysis (net-zero KPIs)
 
 `tremco-netzero.js` adds a **Client & Asset Analysis** panel to the dashboard,
@@ -275,6 +373,7 @@ preset here — add one to the `PLANS` map in `config.js` if you need it.
 | `sales-proposal.html` | **not actually shared — see below** | Proposal builder |
 | `config.js` | **tenant-specific** | The main file to edit |
 | `tremco-netzero.js` | **tenant-specific** | Client & Asset Analysis KPI panel |
+| `tremco-patches.js` | **temporary** | Upgrade-badge CSS fix; delete when upstream ships |
 | `tremco-netzero-preview.html` | dev only | Offline preview of the panel; inert, safe to delete |
 | `tremco-logo.png` | tenant asset | Tremco wordmark |
 | `tremco-logo-white.png` | tenant asset | Reversed, for dark backgrounds |
